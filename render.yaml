@@ -1,0 +1,26 @@
+services:
+  - type: web
+    name: lt-ai-workspace
+    runtime: docker
+    plan: starter
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: XJ_API_BASE_URL
+        value: https://xjjuhe.site/v1
+      - key: XJ_API_KEY
+        sync: false
+      - key: APP_USERNAME
+        sync: false
+      - key: APP_PASSWORD
+        sync: false
+      - key: APP_SESSION_SECRET
+        generateValue: true
+      - key: DATABASE_PATH
+        value: /var/data/app.db
+    disk:
+      name: lt-ai-workspace-data
+      mountPath: /var/data
+      sizeGB: 1

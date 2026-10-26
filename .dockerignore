@@ -1,0 +1,12 @@
+.git
+.next
+node_modules
+coverage
+data
+.env
+.env.*
+!.env.example
+*.db
+*.db-shm
+*.db-wal
+*.tsbuildinfo
