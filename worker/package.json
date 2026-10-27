@@ -1,0 +1,8 @@
+{
+  "name": "lt-chat-worker",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "vitest --run"
+  }
+}
