@@ -1,12 +1,12 @@
 # GitHub Pages 静态聊天站
 
-`site/` 是无构建依赖的手机优先聊天页面。它只把对话保存到当前浏览器的 `localStorage`，模型请求通过 Cloudflare Worker 完成。
+`site/` 是无构建依赖的手机优先聊天页面。它只把对话保存到当前浏览器的 `localStorage`，模型请求通过 Cloudflare Pages API 入口转到原 Worker 完成。入口部署见 `cloudflare-pages/README.md`。
 
 发布前编辑 `config.js`：
 
 ```js
 window.LT_CONFIG = {
-  workerUrl: 'https://你的-worker.workers.dev',
+  workerUrl: 'https://lt-ai-chat-proxy.pages.dev',
 };
 ```
 

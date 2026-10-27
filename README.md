@@ -41,7 +41,7 @@ Render 配置使用 1 GB 持久化磁盘和 Starter Web Service；创建线上�
 如果只需要个人 AI 对话，可直接发布 `site/` 静态版本：GitHub Pages 托管页面，Cloudflare Worker 代理模型接口，聊天历史只保存在当前手机浏览器。完整步骤见 `site/README.md` 和 `worker/README.md`。
 
 1. 在 Cloudflare 部署 `worker/`，设置 `XJ_API_KEY`、`APP_USERNAME`、`APP_PASSWORD`、`APP_SESSION_SECRET` 四个 secret，并把 `WEB_ORIGIN` 设置为 Pages 来源（例如 `https://liotewen.github.io`，不带 `/LT001` 路径）。
-2. 将 Worker 的 `workers.dev` 地址填入 `site/config.js`。
+2. 发布 `cloudflare-pages/deploy/` 到 Cloudflare Pages 项目 `lt-ai-chat-proxy`，它会把 `/api/*` 转发到上面的 Worker；`site/config.js` 已指向 `https://lt-ai-chat-proxy.pages.dev`，避免手机直接访问 `workers.dev`。
 3. 推送到 `main`，`.github/workflows/deploy-pages.yml` 会发布 `site/`。
 
 GitHub Pages 本身不能安全保存模型 API Key；不要把密钥写入 `site/`、GitHub Actions 日志或仓库文件。

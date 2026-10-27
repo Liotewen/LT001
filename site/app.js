@@ -307,7 +307,9 @@ function api(path, options = {}) {
   const headers = new Headers(options.headers || {});
   if (sessionToken) headers.set('authorization', `Bearer ${sessionToken}`);
   if (options.body && !headers.has('content-type')) headers.set('content-type', 'application/json');
-  return fetch(`${workerUrl}${path}`, { ...options, headers, credentials: 'omit' });
+  return fetch(`${workerUrl}${path}`, { ...options, headers, credentials: 'omit' }).catch(() => {
+    throw new Error('连接不到聊天服务，请检查网络后重试。');
+  });
 }
 
 async function logout() {
