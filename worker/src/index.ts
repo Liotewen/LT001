@@ -19,7 +19,7 @@ export interface Env {
   WEB_ORIGIN: string;
 }
 
-const jsonHeaders = { 'content-type': 'application/json; charset=utf-8' };
+const jsonHeaders = { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' };
 
 function json(data: unknown, status = 200, extra: HeadersInit = {}) {
   return new Response(JSON.stringify(data), { status, headers: { ...jsonHeaders, ...extra } });
@@ -29,7 +29,7 @@ function corsHeaders(env: Env) {
   return {
     'access-control-allow-origin': env.WEB_ORIGIN,
     'access-control-allow-credentials': 'true',
-    'access-control-allow-headers': 'content-type',
+    'access-control-allow-headers': 'content-type,authorization',
     'access-control-allow-methods': 'GET,POST,OPTIONS',
     vary: 'Origin',
   };
@@ -55,9 +55,11 @@ function cookieValue(request: Request) {
 }
 
 async function session(request: Request, env: Env) {
-  const token = cookieValue(request);
+  const authorization = request.headers.get('authorization');
+  const token = authorization ? /^Bearer (\S+)$/i.exec(authorization)?.[1] : cookieValue(request);
   if (!token || !env.APP_SESSION_SECRET) return null;
-  return verifySessionToken(token, env.APP_SESSION_SECRET);
+  const current = await verifySessionToken(token, env.APP_SESSION_SECRET);
+  return current?.username === env.APP_USERNAME ? current : null;
 }
 
 function sessionCookie(token: string, request: Request) {
@@ -87,21 +89,26 @@ function safeProviderStream(body: ReadableStream<Uint8Array>) {
   const decoder = new TextDecoder();
   let buffer = '';
   let closed = false;
+  let completed = false;
+  const encoder = new TextEncoder();
+  const emit = (controller: ReadableStreamDefaultController<Uint8Array>, event: string, data: unknown) => {
+    controller.enqueue(encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`));
+  };
 
   const emitLine = (controller: ReadableStreamDefaultController<Uint8Array>, line: string) => {
-    if (!line.startsWith('data:')) {
-      controller.enqueue(new TextEncoder().encode(`${line}\n`));
-      return;
-    }
+    if (!line.startsWith('data:') || completed) return;
     const raw = line.slice(5).trim();
-    if (!raw || raw === '[DONE]') {
-      controller.enqueue(new TextEncoder().encode(`${line}\n`));
+    if (!raw) return;
+    if (raw === '[DONE]') {
+      completed = true;
+      emit(controller, 'done', {});
       return;
     }
     try {
       const payload = JSON.parse(raw) as Record<string, unknown>;
       if (payload.error) {
-        controller.enqueue(new TextEncoder().encode('event: error\ndata: {"code":"PROVIDER_ERROR","message":"模型请求失败，请稍后重试"}\n'));
+        completed = true;
+        emit(controller, 'error', { code: 'PROVIDER_ERROR', message: '模型请求失败，请稍后重试' });
         return;
       }
       const choices = payload.choices;
@@ -111,13 +118,16 @@ function safeProviderStream(body: ReadableStream<Uint8Array>) {
       const content = delta && typeof delta === 'object' && typeof (delta as Record<string, unknown>).content === 'string'
         ? (delta as Record<string, unknown>).content : null;
       if (content) {
-        controller.enqueue(new TextEncoder().encode(`event: delta\ndata: ${JSON.stringify({ content })}\n`));
-        return;
+        emit(controller, 'delta', { content });
+      }
+      if (typeof firstChoice?.finish_reason === 'string') {
+        completed = true;
+        if (firstChoice.finish_reason === 'stop') emit(controller, 'done', {});
+        else emit(controller, 'error', { code: 'INCOMPLETE_REPLY', message: '本次回复未完整结束，可以继续提问。' });
       }
     } catch {
-      // Preserve non-JSON provider data; the client still receives a valid SSE stream.
+      // Ignore provider diagnostics; only normalized events cross the proxy.
     }
-    controller.enqueue(new TextEncoder().encode(`${line}\n`));
   };
 
   return new ReadableStream<Uint8Array>({
@@ -128,18 +138,25 @@ function safeProviderStream(body: ReadableStream<Uint8Array>) {
           if (result.done) break;
           buffer += decoder.decode(result.value, { stream: true });
           let newline = buffer.indexOf('\n');
-          while (newline >= 0) {
+          while (newline >= 0 && !closed) {
             emitLine(controller, buffer.slice(0, newline).replace(/\r$/, ''));
-            controller.enqueue(new TextEncoder().encode('\n'));
             buffer = buffer.slice(newline + 1);
             newline = buffer.indexOf('\n');
           }
         }
-        buffer += decoder.decode();
-        if (buffer) emitLine(controller, buffer.replace(/\r$/, ''));
-        controller.close();
+        if (!closed) {
+          buffer += decoder.decode();
+          if (buffer) emitLine(controller, buffer.replace(/\r$/, ''));
+          if (!completed) emit(controller, 'error', { code: 'STREAM_INTERRUPTED', message: '回复连接中断，请稍后重试。' });
+          controller.close();
+        }
       } catch {
-        controller.close();
+        if (!closed) {
+          emit(controller, 'error', { code: 'STREAM_INTERRUPTED', message: '回复连接中断，请稍后重试。' });
+          controller.close();
+        }
+      } finally {
+        reader.releaseLock();
       }
     },
     async cancel() {
@@ -167,7 +184,7 @@ async function handle(request: Request, env: Env): Promise<Response> {
       return errorResponse('INVALID_CREDENTIALS', '账号或密码错误', 401, env);
     }
     const token = await createSessionToken(credentials.username, env.APP_SESSION_SECRET);
-    return withCors(json({ authenticated: true, username: credentials.username }, 200, { 'set-cookie': sessionCookie(token, request) }), env);
+    return withCors(json({ authenticated: true, username: credentials.username, token }, 200, { 'set-cookie': sessionCookie(token, request) }), env);
   }
 
   if (url.pathname === '/api/auth/me' && request.method === 'GET') {

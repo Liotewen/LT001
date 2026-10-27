@@ -4,7 +4,7 @@
 
 **Goal:** Deliver a phone-first static chat site on GitHub Pages with local conversation history and a Cloudflare Worker proxy for authenticated `gpt-6.1-sol` streaming chat.
 
-**Architecture:** `site/` is a dependency-free static app served by GitHub Pages. It stores versioned conversation state in `localStorage`, sends the selected conversation context to a Worker, and renders SSE deltas. `worker/` is a TypeScript-free-at-runtime Cloudflare Worker source that validates credentials and requests, signs an HttpOnly session cookie, and forwards the upstream provider stream while keeping `XJ_API_KEY` server-side.
+**Architecture:** `site/` is a dependency-free static app served by GitHub Pages. It stores versioned conversation state in `localStorage`, sends the selected conversation context to a Worker, and renders SSE deltas. The Worker validates credentials and requests, signs bearer sessions (with HttpOnly cookie compatibility), and normalizes upstream events while keeping `XJ_API_KEY` server-side. Bearer tokens are kept in the current tab's sessionStorage to support mobile browsers that block third-party cookies.
 
 **Tech Stack:** HTML, CSS, browser JavaScript, Cloudflare Workers Fetch API, Wrangler, Vitest tests for pure Worker helpers.
 
@@ -63,7 +63,7 @@
 
 **Interfaces:**
 - Consumes the Worker URL from `site/config.js`.
-- Sends `{ messages, reasoningEffort }` to `/api/chat` with credentialed fetch.
+- Sends `{ messages, reasoningEffort }` to `/api/chat` with bearer authorization and `credentials: 'omit'`.
 
 - [ ] **Step 1: Add browser-level source tests** for state migration/validation and request payload shape.
 - [ ] **Step 2: Implement login, responsive drawer, conversation CRUD, local export/import, effort selector, and streamed assistant rendering.**

@@ -43,6 +43,11 @@ describe('worker core validation and signing', () => {
     expect(await verifySessionToken(token, 'test-secret', now + 8 * 24 * 60 * 60 * 1000)).toBeNull();
   });
 
+  it('explains the context limit without silently dropping messages', () => {
+    const messages = Array.from({ length: 101 }, () => ({ role: 'user', content: '保留我的上下文' }));
+    expect(() => parseChatBody({ messages, reasoningEffort: 'medium' })).toThrow(/100.*新建对话/);
+  });
+
   it('builds the fixed upstream request without browser-only fields', () => {
     const request = buildUpstreamChatRequest([
       { role: 'user', content: 'hello' },

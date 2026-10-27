@@ -36,3 +36,15 @@ test('serializes a validated state for manual backup', () => {
   const state = emptyState(() => '2026-01-01T00:00:00.000Z');
   assert.equal(JSON.parse(serializeState(state)).version, 1);
 });
+
+test('preserves all saved conversations after the hundredth chat', () => {
+  const state = emptyState();
+  for (let index = 0; index < 101; index += 1) {
+    const conversation = createConversation(state, () => `chat-${index}`);
+    appendMessage(state, conversation.id, 'user', `saved message ${index}`);
+  }
+  const restored = loadState(serializeState(state));
+  assert.equal(restored.conversations.length, 101);
+  assert.equal(restored.selectedId, 'chat-100');
+  assert.equal(restored.conversations.at(-1).messages[0].content, 'saved message 0');
+});

@@ -45,7 +45,6 @@ export function isValidState(value) {
     && value.version === STATE_VERSION
     && (value.selectedId === null || typeof value.selectedId === 'string')
     && Array.isArray(value.conversations)
-    && value.conversations.length <= 100
     && value.conversations.every(validConversation);
 }
 

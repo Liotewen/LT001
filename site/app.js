@@ -21,6 +21,18 @@ let isBusy = false;
 let streamingText = '';
 let notice = '';
 let drawerOpen = false;
+const SESSION_KEY = 'lt-chat-session';
+let sessionToken = '';
+let streamingConversationId = null;
+try { sessionToken = sessionStorage.getItem(SESSION_KEY) || ''; } catch { /* Memory-only login remains available. */ }
+
+function setSession(token) {
+  sessionToken = token || '';
+  try {
+    if (sessionToken) sessionStorage.setItem(SESSION_KEY, sessionToken);
+    else sessionStorage.removeItem(SESSION_KEY);
+  } catch { /* Retain the session in memory when storage is restricted. */ }
+}
 
 function isConfigured() {
   return /^https:\/\//.test(workerUrl) && !workerUrl.includes('YOUR-WORKER');
@@ -86,6 +98,8 @@ function showLogin(error = '') {
       const response = await api('/api/auth/login', { method: 'POST', body: JSON.stringify({ username, password }) });
       if (!response.ok) throw await responseError(response);
       const result = await response.json();
+      if (!result.token) throw new Error('登录服务返回无效，请刷新后重试。');
+      setSession(result.token);
       currentUser = result.username || username;
       state = readState();
       ensureConversation();
@@ -98,7 +112,8 @@ function showLogin(error = '') {
 }
 
 function ensureConversation() {
-  if (!state || !state.conversations.length) createConversation(state);
+  if (!state) state = readState();
+  if (!state.conversations.length) createConversation(state);
   if (!selectedConversation(state)) state.selectedId = state.conversations[0].id;
   persist();
 }
@@ -112,7 +127,8 @@ function renderApp() {
   const conversation = selectedConversation(state);
   const list = state.conversations.map((item) => `<button class="conversation-item ${item.id === state.selectedId ? 'selected' : ''}" data-conversation="${escapeHtml(item.id)}"><span>${escapeHtml(item.title)}</span><time>${formatTime(item.updatedAt)}</time></button>`).join('');
   const messages = conversation.messages.map(messageHtml).join('');
-  const streaming = streamingText ? messageHtml({ role: 'assistant', content: streamingText, createdAt: new Date().toISOString() }) : '';
+  const visibleStream = streamingConversationId === conversation.id ? streamingText : '';
+  const streaming = visibleStream ? messageHtml({ role: 'assistant', content: visibleStream, createdAt: new Date().toISOString() }) : '';
   root.className = `app-page ${drawerOpen ? 'drawer-open' : ''}`;
   root.innerHTML = `<div class="app-shell">
     <div class="drawer-scrim" id="drawer-scrim"></div>
@@ -126,12 +142,13 @@ function renderApp() {
     <main class="chat-panel">
       <header class="topbar"><button class="icon-button mobile-only" id="open-drawer" aria-label="打开对话列表">☰</button><div class="title-block"><span>当前对话</span><h1>${escapeHtml(conversation.title)}</h1></div><div class="top-actions"><span class="model-pill">gpt-6.1-sol</span><button class="icon-button" id="delete-chat" aria-label="删除当前对话">⌫</button><select id="effort" aria-label="思考深度"><option value="low" ${conversation.reasoningEffort === 'low' ? 'selected' : ''}>轻度思考</option><option value="medium" ${conversation.reasoningEffort === 'medium' ? 'selected' : ''}>标准思考</option><option value="high" ${conversation.reasoningEffort === 'high' ? 'selected' : ''}>深度思考</option></select></div></header>
       <section class="message-scroller" id="message-scroller" aria-live="polite">${conversation.messages.length || streamingText ? `${messages}${streaming}` : '<div class="empty-chat"><div class="empty-icon">✦</div><h2>从一个问题开始</h2><p>我会记住这段对话中的上下文。你也可以随时切换思考深度。</p><div class="suggestions"><button data-suggestion="帮我梳理一个今天可以完成的计划">梳理今天的计划</button><button data-suggestion="帮我把一个想法变成清晰的方案">把想法变成方案</button></div></div>'}</section>
-      ${notice ? `<div class="notice" role="status">${escapeHtml(notice)}</div>` : ''}
+      <div class="notice" role="status" ${notice ? '' : 'hidden'}>${escapeHtml(notice)}</div>
       <form class="composer" id="chat-form"><textarea id="prompt" rows="1" maxlength="20000" placeholder="写下你的问题…" ${isBusy ? 'disabled' : ''}>${escapeHtml(draft)}</textarea><div class="composer-foot"><span>Enter 发送 · Shift + Enter 换行</span><button class="send-button" type="submit" ${isBusy ? 'disabled' : ''} aria-label="发送">${isBusy ? '<span class="spinner"></span>' : '↑'}</button></div></form>
       <p class="privacy-note">对话历史仅保存在这部设备的浏览器中 · <button id="clear-notice" class="link-button">了解本地备份</button></p>
     </main>
   </div>`;
   bindAppEvents();
+  for (const id of ['delete-chat', 'import-chat', 'logout']) document.getElementById(id).disabled = isBusy;
   const scroller = document.querySelector('#message-scroller');
   scroller.scrollTop = scroller.scrollHeight;
 }
@@ -150,6 +167,7 @@ function bindAppEvents() {
   }));
   document.querySelectorAll('[data-suggestion]').forEach((button) => button.addEventListener('click', () => {
     draft = button.dataset.suggestion;
+    document.querySelector('#prompt').value = draft;
     focusPrompt();
   }));
   document.querySelector('#delete-chat')?.addEventListener('click', () => {
@@ -194,12 +212,13 @@ async function sendMessage() {
   streamingText = '';
   notice = '';
   isBusy = true;
+  streamingConversationId = conversation.id;
   persist();
   renderApp();
   let authExpired = false;
   try {
     const response = await api('/api/chat', { method: 'POST', body: JSON.stringify(buildChatPayload(conversation, conversation.reasoningEffort)) });
-    if (response.status === 401) { authExpired = true; currentUser = ''; showLogin('登录已过期，请重新登录。'); return; }
+    if (response.status === 401) { authExpired = true; setSession(''); currentUser = ''; showLogin('登录已过期，请重新登录。'); return; }
     if (!response.ok) throw await responseError(response);
     await consumeStream(response);
     if (streamingText) appendMessage(state, conversation.id, 'assistant', streamingText);
@@ -208,6 +227,7 @@ async function sendMessage() {
     notice = error.message || '模型请求失败，请稍后重试。';
   } finally {
     streamingText = '';
+    streamingConversationId = null;
     isBusy = false;
     persist();
     if (!authExpired) renderApp();
@@ -221,12 +241,15 @@ async function consumeStream(response) {
   let buffer = '';
   let eventName = 'message';
   let data = [];
+  let completed = false;
   const flushEvent = () => {
     if (!data.length) return;
     const raw = data.join('\n');
     data = [];
     if (eventName === 'delta') {
       try { streamingText += JSON.parse(raw).content || ''; renderMessagesOnly(); } catch { /* Ignore malformed provider chunks. */ }
+    } else if (eventName === 'done') {
+      completed = true;
     } else if (eventName === 'error') {
       let message = '模型请求失败，请稍后重试。';
       try { message = JSON.parse(raw).message || message; } catch { /* Keep the safe fallback. */ }
@@ -234,6 +257,7 @@ async function consumeStream(response) {
     }
     eventName = 'message';
   };
+  try {
   while (true) {
     const result = await reader.read();
     if (result.done) break;
@@ -250,12 +274,19 @@ async function consumeStream(response) {
   }
   buffer += decoder.decode();
   if (buffer.trim()) { if (buffer.startsWith('data:')) data.push(buffer.slice(5).trim()); flushEvent(); }
+  flushEvent();
+  if (!completed) throw new Error('回复连接中断，请稍后重试。');
+  if (!streamingText) throw new Error('模型没有返回内容，请稍后重试。');
+  } finally {
+    await reader.cancel().catch(() => undefined);
+    reader.releaseLock();
+  }
 }
 
 function renderMessagesOnly() {
   const conversation = selectedConversation(state);
   const node = document.querySelector('#message-scroller');
-  if (!node || !conversation) return;
+  if (!node || !conversation || conversation.id !== streamingConversationId) return;
   const messages = conversation.messages.map(messageHtml).join('');
   const streaming = streamingText ? messageHtml({ role: 'assistant', content: streamingText, createdAt: new Date().toISOString() }) : '';
   node.innerHTML = `${messages}${streaming}`;
@@ -274,13 +305,15 @@ async function responseError(response) {
 function api(path, options = {}) {
   if (!isConfigured()) return Promise.reject(new Error('请先在 site/config.js 填写 Worker 地址。'));
   const headers = new Headers(options.headers || {});
+  if (sessionToken) headers.set('authorization', `Bearer ${sessionToken}`);
   if (options.body && !headers.has('content-type')) headers.set('content-type', 'application/json');
-  return fetch(`${workerUrl}${path}`, { ...options, headers, credentials: 'include' });
+  return fetch(`${workerUrl}${path}`, { ...options, headers, credentials: 'omit' });
 }
 
 async function logout() {
   try { await api('/api/auth/logout', { method: 'POST' }); } catch { /* Local logout still clears the screen. */ }
   currentUser = '';
+  setSession('');
   showLogin();
 }
 
@@ -323,6 +356,7 @@ async function checkSession() {
     ensureConversation();
     renderApp();
   } catch {
+    setSession('');
     showLogin();
   }
 }

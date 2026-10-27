@@ -59,6 +59,41 @@ describe('cloudflare worker routes', () => {
     expect(await response.json()).toEqual({ authenticated: true, username: 'owner' });
   });
 
+  it('authenticates a cross-site browser without third-party cookies', async () => {
+    const login = await worker.fetch(request('/api/auth/login', {
+      method: 'POST',
+      body: JSON.stringify({ username: env.APP_USERNAME, password: env.APP_PASSWORD }),
+    }), env);
+    const result = await login.json() as { token: string };
+    expect(result.token).toEqual(expect.any(String));
+    expect(login.headers.get('cache-control')).toBe('no-store');
+    const response = await worker.fetch(request('/api/auth/me', {
+      headers: { authorization: `Bearer ${result.token}` },
+    }), env);
+    expect(response.status).toBe(200);
+    const preflight = await worker.fetch(request('/api/chat', { method: 'OPTIONS' }), env);
+    expect(preflight.headers.get('access-control-allow-headers')).toContain('authorization');
+  });
+
+  it('rejects missing, forged and no-longer-current-user sessions', async () => {
+    for (const token of ['', 'forged', await createSessionToken('old-user', env.APP_SESSION_SECRET)]) {
+      const response = await worker.fetch(request('/api/auth/me', { headers: { authorization: `Bearer ${token}` } }), env);
+      expect(response.status).toBe(401);
+    }
+  });
+
+  it('reports interrupted provider streams without forwarding raw provider data', async () => {
+    const token = await createSessionToken('owner', env.APP_SESSION_SECRET);
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('data: private upstream diagnostics\n\n')));
+    const response = await worker.fetch(request('/api/chat', {
+      method: 'POST', headers: { authorization: `Bearer ${token}` },
+      body: JSON.stringify({ messages: [{ role: 'user', content: 'test' }], reasoningEffort: 'low' }),
+    }), env);
+    const stream = await response.text();
+    expect(stream).toContain('STREAM_INTERRUPTED');
+    expect(stream).not.toContain('private upstream diagnostics');
+  });
+
   it('forwards complete context and reasoning effort while keeping the key server-side', async () => {
     const token = await createSessionToken('owner', env.APP_SESSION_SECRET);
     const fetchMock = vi.fn(async () => new Response([

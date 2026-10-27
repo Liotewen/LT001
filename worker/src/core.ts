@@ -29,9 +29,10 @@ export function parseLoginBody(body: unknown) {
 }
 
 export function parseChatBody(body: unknown): { messages: ChatMessage[]; reasoningEffort: ReasoningEffort } {
-  if (!isRecord(body) || !Array.isArray(body.messages) || body.messages.length < 1 || body.messages.length > 100) {
+  if (!isRecord(body) || !Array.isArray(body.messages) || body.messages.length < 1) {
     throw new InputError('消息不能为空');
   }
+  if (body.messages.length > 100) throw new InputError('当前对话已超过 100 条消息，请新建对话后继续。原对话仍保存在本机。');
   const messages: ChatMessage[] = [];
   let totalLength = 0;
   for (const item of body.messages) {

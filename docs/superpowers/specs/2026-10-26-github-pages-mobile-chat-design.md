@@ -22,7 +22,7 @@ The static site does not include projects, image generation, server-side SQLite,
 ```text
 Phone browser
   ├─ GitHub Pages: static HTML/CSS/JavaScript
-  └─ Cloudflare Worker: login, signed HttpOnly session, chat proxy
+  └─ Cloudflare Worker: login, signed bearer session, chat proxy
                                       └─ xjjuhe.site/v1/codex/chat/completions
 ```
 
@@ -30,13 +30,13 @@ The browser stores conversations under a versioned local-storage key. Each chat 
 
 ## Worker API contract
 
-All API endpoints require the exact `WEB_ORIGIN` CORS origin. Credentialed requests use the `lt_chat_session` HttpOnly cookie.
+All API endpoints require the exact `WEB_ORIGIN` CORS origin. The static browser uses `Authorization: Bearer <session token>` and `credentials: 'omit'` so mobile third-party-cookie restrictions do not prevent login. The Worker retains HttpOnly cookie compatibility.
 
 ### `POST /api/auth/login`
 
 Request: `{ "username": string, "password": string }`.
 
-Success: `200 { "authenticated": true, "username": string }` and a signed session cookie.
+Success: `200 { "authenticated": true, "username": string, "token": string }` and a signed session cookie.
 
 Failure: `400` for malformed input or `401` for invalid credentials.
 
@@ -48,17 +48,17 @@ Failure: `401 { "error": { "code": "UNAUTHORIZED", "message": string } }`.
 
 ### `POST /api/auth/logout`
 
-Clears the session cookie and returns `204`.
+Clears the session cookie and returns `204`; the browser clears its token from memory and sessionStorage. Already-issued tokens expire after seven days; rotating the server session secret invalidates all existing sessions.
 
 ### `POST /api/chat`
 
 Request: `{ "messages": Array<{ "role": "user" | "assistant", "content": string }>, "reasoningEffort": "low" | "medium" | "high" }`.
 
-The Worker validates the message count and content sizes, sends `model: "gpt-6.1-sol"`, `stream: true`, and the requested `reasoning_effort` upstream, and returns the provider's `text/event-stream` body. Provider credentials and raw provider errors never reach the browser.
+The Worker validates the message count and content sizes, sends `model: "gpt-6.1-sol"`, `stream: true`, and the requested `reasoning_effort` upstream, and returns normalized SSE `delta`, `done`, and safe `error` events. Provider credentials and raw provider errors never reach the browser. Requests exceeding 100 messages, 20,000 characters per message, or 200,000 characters total are rejected with an explanation; context is never silently truncated.
 
 ## Security and configuration
 
-The model key, login username, login password, session secret, upstream base URL, and GitHub/Cloudflare credentials are never committed. The Worker reads them from Wrangler secrets or variables:
+The model key, login username, login password, session secret, and GitHub/Cloudflare credentials are never committed. The public upstream base URL and allowed origin are Wrangler variables. The Worker reads configuration as follows:
 
 - `XJ_API_KEY` secret
 - `APP_USERNAME` secret
@@ -67,7 +67,7 @@ The model key, login username, login password, session secret, upstream base URL
 - `XJ_API_BASE_URL` variable, defaulting to `https://xjjuhe.site/v1`
 - `WEB_ORIGIN` variable set to the GitHub Pages origin
 
-The session token is an HMAC-signed, expiring token. The Worker responds with `Secure`, `HttpOnly`, `SameSite=Lax` cookie attributes. The static site does not store the password or model key.
+The session token is an HMAC-signed, expiring token stored only in the current tab's sessionStorage (or memory when unavailable). Conversation exports exclude the token. The compatibility cookie uses `Secure`, `HttpOnly`, `SameSite=Lax`. The static site does not store the password or model key.
 
 ## Static site storage
 
@@ -102,7 +102,7 @@ The UI handles disabled or full storage by keeping the current session in memory
 - `worker/README.md` gives exact commands for setting variables/secrets and deploying.
 - `site/config.js` contains only the public Worker URL and can be changed without touching application logic.
 
-GitHub Pages can be deployed without a build step. The Worker must be deployed from the user's Cloudflare account because this workspace has no Cloudflare account credential. The repository will contain placeholders and commands only.
+GitHub Pages deploys without a build step. The Worker is deployed from the user's Cloudflare account using official Wrangler OAuth, with four secrets injected through stdin. The public Worker URL is configured in `site/config.js`.
 
 ## Error handling
 
