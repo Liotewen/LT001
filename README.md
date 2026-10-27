@@ -45,3 +45,5 @@ Render 配置使用 1 GB 持久化磁盘和 Starter Web Service；创建线上�
 3. 推送到 `main`，`.github/workflows/deploy-pages.yml` 会发布 `site/`。
 
 GitHub Pages 本身不能安全保存模型 API Key；不要把密钥写入 `site/`、GitHub Actions 日志或仓库文件。
+
+仓库 Pages 发布源已设置为 GitHub Actions，推送到 `main` 后会自动更新静态站点。
