@@ -8,6 +8,9 @@ import {
   verifySessionToken,
 } from '../src/core';
 
+const pngUrl = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+j5S8AAAAASUVORK5CYII=';
+const imagePart = (url = pngUrl) => ({ type: 'image_url', image_url: { url, detail: 'auto' } });
+
 describe('worker core validation and signing', () => {
   it('accepts only bounded login payloads', () => {
     expect(parseLoginBody({ username: 'owner', password: 'secret' })).toEqual({ username: 'owner', password: 'secret' });
@@ -41,6 +44,49 @@ describe('worker core validation and signing', () => {
     expect((await verifySessionToken(token, 'test-secret', now))?.username).toBe('owner');
     expect(await verifySessionToken(`${token}x`, 'test-secret', now)).toBeNull();
     expect(await verifySessionToken(token, 'test-secret', now + 8 * 24 * 60 * 60 * 1000)).toBeNull();
+  });
+
+  it('accepts image context without losing message order and strips extra fields', () => {
+    const parsed = parseChatBody({ messages: [
+      { role: 'user', content: [
+        { type: 'text', text: '看一下截图', ignored: 'discard' },
+        { ...imagePart(), ignored: 'discard' },
+      ], ignored: 'discard' },
+      { role: 'assistant', content: '收到图片' },
+      { role: 'user', content: '继续分析' },
+    ], reasoningEffort: 'high' });
+    expect(parsed.messages).toEqual([
+      { role: 'user', content: [{ type: 'text', text: '看一下截图' }, imagePart()] },
+      { role: 'assistant', content: '收到图片' },
+      { role: 'user', content: '继续分析' },
+    ]);
+  });
+
+  it('rejects unsafe image sources, malformed base64 and spoofed image types', () => {
+    for (const url of ['https://example.com/a.png', 'data:image/svg+xml;base64,PHN2Zz4=',
+      'data:image/png;base64,SGVsbG8=', 'data:image/jpeg;base64,iVBORw0KGgo=',
+      'data:image/png;base64,iVBORw0KGgo=!!!!', 'data:image/png;base64,iVBORw0KGgo']) {
+      expect(() => parseChatBody({ messages: [{ role: 'user', content: [imagePart(url)] }], reasoningEffort: 'low' })).toThrow();
+    }
+  });
+
+  it('limits image count and image size before contacting the provider', () => {
+    expect(() => parseChatBody({ messages: [{ role: 'user', content: Array.from({ length: 5 }, () => imagePart()) }], reasoningEffort: 'low' })).toThrow(/4.*图片/);
+    const largePng = `data:image/png;base64,${btoa('\x89PNG\r\n\x1a\n' + 'A'.repeat(570_000))}`;
+    expect(() => parseChatBody({ messages: [{ role: 'user', content: [imagePart(largePng)] }], reasoningEffort: 'low' })).toThrow(/图片.*过大/);
+    const mediumPng = `data:image/png;base64,${btoa('\x89PNG\r\n\x1a\n' + 'A'.repeat(400_000))}`;
+    const messages = Array.from({ length: 3 }, () => ({ role: 'user', content: Array.from({ length: 4 }, () => imagePart(mediumPng)) }));
+    expect(() => parseChatBody({ messages, reasoningEffort: 'low' })).toThrow(/图片.*新建对话/);
+  });
+
+  it('validates multimodal text and rejects unsupported content parts', () => {
+    for (const content of [[], [{ type: 'text', text: '' }], [{ type: 'input_audio', input_audio: {} }],
+      [imagePart(), { type: 'text', text: 'a'.repeat(20_001) }],
+      [{ type: 'text', text: 'a'.repeat(11_000) }, { type: 'text', text: 'b'.repeat(11_000) }]]) {
+      expect(() => parseChatBody({ messages: [{ role: 'user', content }], reasoningEffort: 'medium' })).toThrow();
+    }
+    expect(() => parseChatBody({ messages: [{ role: 'assistant', content: [imagePart()] }], reasoningEffort: 'low' })).toThrow();
+    expect(() => parseChatBody({ messages: [{ role: 'user', content: [{ type: 'image_url', image_url: { url: pngUrl, detail: 'invalid' } }] }], reasoningEffort: 'low' })).toThrow();
   });
 
   it('explains the context limit without silently dropping messages', () => {

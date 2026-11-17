@@ -9,7 +9,8 @@ import {
   selectedConversation,
   serializeState,
   writeState,
-} from './state.mjs';
+} from './state.mjs?v=20261117-images';
+import { isValidImageAttachment, prepareImages } from './images.mjs?v=20261117-images';
 
 const root = document.querySelector('#app');
 const config = globalThis.LT_CONFIG || {};
@@ -21,6 +22,11 @@ let isBusy = false;
 let streamingText = '';
 let notice = '';
 let drawerOpen = false;
+const imageDrafts = new Map();
+let preparingImages = false;
+let importingBackup = false;
+let imageSelectionSerial = 0;
+const STORAGE_WARNING = '本机存储空间不足或不可用，请导出备份；未保存的内容刷新后会丢失。';
 const SESSION_KEY = 'lt-chat-session';
 let sessionToken = '';
 let streamingConversationId = null;
@@ -52,18 +58,20 @@ function formatTime(value) {
 
 function messageHtml(message) {
   const label = message.role === 'user' ? '你' : 'LT AI';
+  const images = (message.images || []).filter(isValidImageAttachment).map((image, index) =>
+    `<button type="button" class="message-image" data-view-image="${escapeHtml(message.id)}" data-image-index="${index}" aria-label="查看图片 ${index + 1}"><img src="${image.dataUrl}" alt="${escapeHtml(image.name || '上传的图片')}" loading="lazy"></button>`).join('');
   return `<article class="message-row ${message.role}">
     <div class="message-avatar">${message.role === 'user' ? '你' : 'LT'}</div>
-    <div class="message-content"><div class="message-meta"><strong>${label}</strong><time>${formatTime(message.createdAt)}</time></div><div class="message-text">${escapeHtml(message.content).replace(/\n/g, '<br>')}</div></div>
+    <div class="message-content"><div class="message-meta"><strong>${label}</strong><time>${formatTime(message.createdAt)}</time></div>${images ? `<div class="message-images">${images}</div>` : ''}<div class="message-text">${escapeHtml(message.content).replace(/\n/g, '<br>')}</div></div>
   </article>`;
 }
 
 function persist() {
   try {
     writeState(state);
-    notice = notice === '本机存储不可用，刷新后可能丢失当前对话。' ? '' : notice;
+    notice = notice === STORAGE_WARNING ? '' : notice;
   } catch {
-    notice = '本机存储不可用，刷新后可能丢失当前对话。';
+    if (!notice.includes(STORAGE_WARNING)) notice = `${notice ? `${notice} ` : ''}${STORAGE_WARNING}`;
   }
 }
 
@@ -129,6 +137,8 @@ function renderApp() {
   const messages = conversation.messages.map(messageHtml).join('');
   const visibleStream = streamingConversationId === conversation.id ? streamingText : '';
   const streaming = visibleStream ? messageHtml({ role: 'assistant', content: visibleStream, createdAt: new Date().toISOString() }) : '';
+  const pending = imageDrafts.get(conversation.id) || [];
+  const previews = pending.map((image, index) => `<div class="image-preview"><img src="${image.dataUrl}" alt="${escapeHtml(image.name || '待发送图片')}"><button type="button" data-remove-image="${index}" aria-label="移除图片 ${index + 1}" ${isBusy || preparingImages || importingBackup ? 'disabled' : ''}>×</button></div>`).join('');
   root.className = `app-page ${drawerOpen ? 'drawer-open' : ''}`;
   root.innerHTML = `<div class="app-shell">
     <div class="drawer-scrim" id="drawer-scrim"></div>
@@ -143,12 +153,13 @@ function renderApp() {
       <header class="topbar"><button class="icon-button mobile-only" id="open-drawer" aria-label="打开对话列表">☰</button><div class="title-block"><span>当前对话</span><h1>${escapeHtml(conversation.title)}</h1></div><div class="top-actions"><span class="model-pill">gpt-6.1-sol</span><button class="icon-button" id="delete-chat" aria-label="删除当前对话">⌫</button><select id="effort" aria-label="思考深度"><option value="low" ${conversation.reasoningEffort === 'low' ? 'selected' : ''}>轻度思考</option><option value="medium" ${conversation.reasoningEffort === 'medium' ? 'selected' : ''}>标准思考</option><option value="high" ${conversation.reasoningEffort === 'high' ? 'selected' : ''}>深度思考</option></select></div></header>
       <section class="message-scroller" id="message-scroller" aria-live="polite">${conversation.messages.length || streamingText ? `${messages}${streaming}` : '<div class="empty-chat"><div class="empty-icon">✦</div><h2>从一个问题开始</h2><p>我会记住这段对话中的上下文。你也可以随时切换思考深度。</p><div class="suggestions"><button data-suggestion="帮我梳理一个今天可以完成的计划">梳理今天的计划</button><button data-suggestion="帮我把一个想法变成清晰的方案">把想法变成方案</button></div></div>'}</section>
       <div class="notice" role="status" ${notice ? '' : 'hidden'}>${escapeHtml(notice)}</div>
-      <form class="composer" id="chat-form"><textarea id="prompt" rows="1" maxlength="20000" placeholder="写下你的问题…" ${isBusy ? 'disabled' : ''}>${escapeHtml(draft)}</textarea><div class="composer-foot"><span>Enter 发送 · Shift + Enter 换行</span><button class="send-button" type="submit" ${isBusy ? 'disabled' : ''} aria-label="发送">${isBusy ? '<span class="spinner"></span>' : '↑'}</button></div></form>
+      <form class="composer" id="chat-form"><div class="image-previews" id="image-previews" ${pending.length ? '' : 'hidden'}>${previews}</div><textarea id="prompt" rows="1" maxlength="20000" placeholder="写下你的问题，也可以上传图片…" ${isBusy ? 'disabled' : ''}>${escapeHtml(draft)}</textarea><div class="composer-foot"><div class="composer-tools"><button class="attach-button" type="button" id="upload-image" aria-label="上传图片" ${isBusy || preparingImages || importingBackup ? 'disabled' : ''}><svg viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="4"/><circle cx="8" cy="8" r="1.5"/><path d="m3 17 5-5 4 4 3-3 6 6"/></svg><span>${preparingImages ? '正在处理…' : '上传图片'}</span></button><span class="composer-hint">${pending.length ? `已选 ${pending.length}/4 张` : 'Enter 发送 · Shift + Enter 换行'}</span><input id="image-file" type="file" accept="image/jpeg,image/png,image/webp,image/gif" multiple hidden></div><button class="send-button" type="submit" ${isBusy || preparingImages || importingBackup ? 'disabled' : ''} aria-label="发送">${isBusy ? '<span class="spinner"></span>' : '↑'}</button></div></form>
       <p class="privacy-note">对话历史仅保存在这部设备的浏览器中 · <button id="clear-notice" class="link-button">了解本地备份</button></p>
     </main>
-  </div>`;
+  </div><dialog class="image-dialog" id="image-dialog"><button type="button" class="image-dialog-close" aria-label="关闭图片">×</button><img alt="图片预览"></dialog>`;
   bindAppEvents();
-  for (const id of ['delete-chat', 'import-chat', 'logout']) document.getElementById(id).disabled = isBusy;
+  for (const id of ['delete-chat', 'import-chat', 'logout']) document.getElementById(id).disabled = isBusy || importingBackup;
+  for (const id of ['new-chat', 'effort', 'prompt']) document.getElementById(id).disabled = importingBackup || (id === 'prompt' && isBusy);
   const scroller = document.querySelector('#message-scroller');
   scroller.scrollTop = scroller.scrollHeight;
 }
@@ -173,6 +184,7 @@ function bindAppEvents() {
   document.querySelector('#delete-chat')?.addEventListener('click', () => {
     const conversation = selectedConversation(state);
     if (!conversation || !window.confirm(`删除“${conversation.title}”？`)) return;
+    imageDrafts.delete(conversation.id);
     removeConversation(state, conversation.id);
     ensureConversation();
     notice = '对话已删除。';
@@ -186,6 +198,29 @@ function bindAppEvents() {
     renderApp();
   });
   document.querySelector('#chat-form')?.addEventListener('submit', (event) => { event.preventDefault(); void sendMessage(); });
+  document.querySelector('#upload-image')?.addEventListener('click', () => document.querySelector('#image-file').click());
+  document.querySelector('#image-file')?.addEventListener('change', (event) => {
+    const files = Array.from(event.target.files || []);
+    event.target.value = '';
+    if (files.length) void addImages(files);
+  });
+  document.querySelectorAll('[data-remove-image]').forEach((button) => button.addEventListener('click', () => {
+    const id = selectedConversation(state).id;
+    imageDrafts.set(id, (imageDrafts.get(id) || []).filter((_, index) => index !== Number(button.dataset.removeImage)));
+    renderApp();
+  }));
+  document.querySelector('#message-scroller')?.addEventListener('click', (event) => {
+    const button = event.target.closest('[data-view-image]');
+    if (!button) return;
+    const message = selectedConversation(state)?.messages.find((item) => item.id === button.dataset.viewImage);
+    const image = message?.images?.[Number(button.dataset.imageIndex)];
+    if (!isValidImageAttachment(image)) return;
+    const dialog = document.querySelector('#image-dialog');
+    dialog.querySelector('img').src = image.dataUrl;
+    dialog.querySelector('img').alt = image.name || '图片预览';
+    dialog.showModal();
+  });
+  document.querySelector('.image-dialog-close')?.addEventListener('click', () => document.querySelector('#image-dialog').close());
   const prompt = document.querySelector('#prompt');
   prompt?.addEventListener('input', () => { draft = prompt.value; prompt.style.height = 'auto'; prompt.style.height = `${Math.min(prompt.scrollHeight, 180)}px`; });
   prompt?.addEventListener('keydown', (event) => {
@@ -198,16 +233,43 @@ function bindAppEvents() {
   document.querySelector('#clear-notice')?.addEventListener('click', () => { notice = '备份会下载为 JSON 文件，可在另一台浏览器手动导入。'; renderApp(); });
 }
 
+async function addImages(files) {
+  if (isBusy || preparingImages || importingBackup) return;
+  const conversationId = selectedConversation(state)?.id;
+  if (!conversationId) return;
+  const serial = ++imageSelectionSerial;
+  const existing = imageDrafts.get(conversationId) || [];
+  preparingImages = true;
+  notice = '';
+  renderApp();
+  try {
+    const images = await prepareImages(files, existing.length);
+    if (serial !== imageSelectionSerial || !state.conversations.some((item) => item.id === conversationId)) return;
+    imageDrafts.set(conversationId, [...existing, ...images]);
+  } catch (error) {
+    if (serial === imageSelectionSerial) notice = error.message || '图片处理失败，请重新选择。';
+  } finally {
+    if (serial === imageSelectionSerial) {
+      preparingImages = false;
+      if (currentUser) renderApp();
+    }
+  }
+}
+
 function focusPrompt() {
   const prompt = document.querySelector('#prompt');
   prompt?.focus();
 }
 
 async function sendMessage() {
-  const content = draft.trim();
   const conversation = selectedConversation(state);
-  if (!content || !conversation || isBusy) return;
-  appendMessage(state, conversation.id, 'user', content);
+  if (!conversation || isBusy || preparingImages || importingBackup) return;
+  const images = imageDrafts.get(conversation.id) || [];
+  const content = draft.trim() || (images.length ? (images.length === 1 ? '请帮我分析这张图片。' : '请帮我分析这些图片。') : '');
+  if (!content) return;
+  const message = appendMessage(state, conversation.id, 'user', content);
+  if (images.length) message.images = images;
+  imageDrafts.delete(conversation.id);
   draft = '';
   streamingText = '';
   notice = '';
@@ -315,6 +377,9 @@ function api(path, options = {}) {
 async function logout() {
   try { await api('/api/auth/logout', { method: 'POST' }); } catch { /* Local logout still clears the screen. */ }
   currentUser = '';
+  imageSelectionSerial += 1;
+  preparingImages = false;
+  imageDrafts.clear();
   setSession('');
   showLogin();
 }
@@ -331,18 +396,26 @@ function exportBackup() {
 }
 
 async function importBackup(event) {
+  if (isBusy || importingBackup) return;
   const file = event.target.files?.[0];
   event.target.value = '';
   if (!file) return;
+  importingBackup = true;
+  notice = '正在导入备份…';
+  renderApp();
   try {
     const imported = JSON.parse(await file.text());
     if (!isValidState(imported)) throw new Error('备份文件格式不正确。');
     state = imported;
+    imageSelectionSerial += 1;
+    preparingImages = false;
+    imageDrafts.clear();
     ensureConversation();
     notice = '备份已导入。';
-    renderApp();
   } catch (error) {
     notice = error.message || '备份导入失败。';
+  } finally {
+    importingBackup = false;
     renderApp();
   }
 }

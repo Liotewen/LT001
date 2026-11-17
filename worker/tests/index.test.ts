@@ -140,6 +140,53 @@ describe('cloudflare worker routes', () => {
     expect(text).not.toContain('provider secret details');
   });
 
+  it('forwards authenticated image messages and later follow-ups unchanged', async () => {
+    const token = await createSessionToken('owner', env.APP_SESSION_SECRET);
+    const fetchMock = vi.fn(async () => new Response('data: [DONE]\n\n'));
+    vi.stubGlobal('fetch', fetchMock);
+    const messages = [
+      { role: 'user', content: [
+        { type: 'text', text: '看图' },
+        { type: 'image_url', image_url: { url: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+j5S8AAAAASUVORK5CYII=', detail: 'auto' } },
+      ] },
+      { role: 'assistant', content: '图片中有文字' },
+      { role: 'user', content: '继续' },
+    ];
+    const response = await worker.fetch(request('/api/chat', {
+      method: 'POST', headers: { authorization: `Bearer ${token}` },
+      body: JSON.stringify({ messages, reasoningEffort: 'high' }),
+    }), env);
+    expect(response.status).toBe(200);
+    await response.text();
+    const init = (fetchMock.mock.calls[0] as unknown as [RequestInfo, RequestInit])[1];
+    expect(JSON.parse(String(init.body))).toEqual({ model: 'gpt-6.1-sol', messages, stream: true, reasoning_effort: 'high' });
+  });
+
+  it('stops oversized uploads while reading the body even without content-length', async () => {
+    const token = await createSessionToken('owner', env.APP_SESSION_SECRET);
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    let cancelled = false;
+    let chunksRead = 0;
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        chunksRead += 1;
+        if (chunksRead <= 12) controller.enqueue(new Uint8Array(1_000_000).fill(32));
+        else controller.close();
+      },
+      cancel() { cancelled = true; },
+    });
+    const init: RequestInit & { duplex: string } = {
+      method: 'POST', headers: { origin: env.WEB_ORIGIN, authorization: `Bearer ${token}` }, body, duplex: 'half',
+    };
+    const response = await worker.fetch(new Request('https://worker.example/api/chat', init), env);
+    expect(response.status).toBe(400);
+    expect((await response.json() as { error: { message: string } }).error.message).toContain('过大');
+    expect(cancelled).toBe(true);
+    expect(chunksRead).toBeLessThan(12);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it('validates chat input before contacting the provider', async () => {
     const token = await createSessionToken('owner', env.APP_SESSION_SECRET);
     const fetchMock = vi.fn();

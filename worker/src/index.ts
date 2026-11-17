@@ -76,10 +76,36 @@ function allowOrigin(request: Request, env: Env) {
   return Boolean(env.WEB_ORIGIN) && request.headers.get('origin') === env.WEB_ORIGIN;
 }
 
-async function requestJson(request: Request) {
+async function requestJson(request: Request, maxBytes?: number) {
   try {
+    if (maxBytes !== undefined) {
+      const tooLarge = () => new InputError('图片和消息内容过大，请减少图片或新建对话');
+      if (Number(request.headers.get('content-length')) > maxBytes) throw tooLarge();
+      if (!request.body) throw new InputError('请求格式无效');
+      const reader = request.body.getReader();
+      const decoder = new TextDecoder();
+      const chunks: string[] = [];
+      let length = 0;
+      try {
+        while (true) {
+          const chunk = await reader.read();
+          if (chunk.done) break;
+          length += chunk.value.byteLength;
+          if (length > maxBytes) {
+            await reader.cancel().catch(() => undefined);
+            throw tooLarge();
+          }
+          chunks.push(decoder.decode(chunk.value, { stream: true }));
+        }
+        chunks.push(decoder.decode());
+        return JSON.parse(chunks.join('')) as unknown;
+      } finally {
+        reader.releaseLock();
+      }
+    }
     return await request.json() as unknown;
-  } catch {
+  } catch (error) {
+    if (error instanceof InputError) throw error;
     throw new InputError('请求格式无效');
   }
 }
@@ -201,7 +227,7 @@ async function handle(request: Request, env: Env): Promise<Response> {
     if (!await session(request, env)) return errorResponse('UNAUTHORIZED', '请先登录', 401, env);
     let body;
     try {
-      body = parseChatBody(await requestJson(request));
+      body = parseChatBody(await requestJson(request, 8_000_000));
     } catch (error) {
       const input = error instanceof InputError ? error : new InputError('请求格式无效');
       return errorResponse(input.code, input.message, 400, env);

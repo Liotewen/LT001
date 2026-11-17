@@ -35,3 +35,7 @@ npm test -- --run worker/tests/core.test.ts worker/tests/index.test.ts
 测试使用假的环境变量，不会读取或输出本机 `.env.local`。
 
 每次请求保留当前对话的完整顺序上下文，不自动截断。单次上限为 100 条消息、单条 20,000 字符、总计 200,000 字符；超限会明确提示。模型固定为 `gpt-6.1-sol`，思考深度为 `low / medium / high`。
+
+用户消息还支持 OpenAI 格式的 `content` 数组：`{type:"text",text:"问题"}` 和 `{type:"image_url",image_url:{url:"data:image/jpeg;base64,...",detail:"auto"}}`。图片只接受 JPEG、PNG、WebP 的内嵌 data URL，并校验文件头；拒绝外部 URL 和 SVG。每条最多 4 张，单图 data URL 最多 750,000 字符，每次请求最多 20 张、图片 data URL 共 6,000,000 字符；HTTP 请求体在读取时限制为 8,000,000 字节。超限返回中文错误，不丢弃上下文。2026-11-17 已用合成测试图验证当前上游模型可识别图片中的字符。
+
+上传功能上线时先部署本 Worker，再推送静态页面，Pages API 代理无需改动。没有新增环境变量、对象存储或数据库依赖。

@@ -3,7 +3,29 @@ export const SESSION_COOKIE = 'lt_chat_session';
 export const SESSION_SECONDS = 7 * 24 * 60 * 60;
 
 export type ReasoningEffort = 'low' | 'medium' | 'high';
-export type ChatMessage = { role: 'user' | 'assistant'; content: string };
+export type TextPart = { type: 'text'; text: string };
+export type ImagePart = { type: 'image_url'; image_url: { url: string; detail?: 'auto' | 'low' | 'high' } };
+export type ChatMessage = { role: 'user' | 'assistant'; content: string | Array<TextPart | ImagePart> };
+
+const MAX_IMAGE_DATA_URL_LENGTH = 750_000;
+const MAX_IMAGE_CONTEXT_LENGTH = 6_000_000;
+
+function parseImagePart(part: Record<string, unknown>): ImagePart {
+  if (!isRecord(part.image_url) || typeof part.image_url.url !== 'string') throw new InputError('图片格式无效');
+  const url = part.image_url.url;
+  if (url.length > MAX_IMAGE_DATA_URL_LENGTH) throw new InputError('图片内容过大，请压缩后重试');
+  const match = /^data:image\/(jpeg|png|webp);base64,([A-Za-z0-9+/]+={0,2})$/.exec(url);
+  if (!match || match[2].length % 4 !== 0) throw new InputError('图片格式无效，请重新上传 JPG、PNG 或 WebP 图片');
+  let header: string;
+  try { header = atob(match[2].slice(0, 24)); } catch { throw new InputError('图片格式无效'); }
+  const valid = match[1] === 'jpeg' ? header.startsWith('\xff\xd8\xff')
+    : match[1] === 'png' ? header.startsWith('\x89PNG\r\n\x1a\n')
+      : header.startsWith('RIFF') && header.slice(8, 12) === 'WEBP';
+  if (!valid) throw new InputError('图片格式与内容不匹配，请重新上传');
+  const detail = part.image_url.detail;
+  if (detail !== undefined && detail !== 'auto' && detail !== 'low' && detail !== 'high') throw new InputError('图片清晰度参数无效');
+  return { type: 'image_url', image_url: { url, ...(detail ? { detail } : {}) } };
+}
 
 export class InputError extends Error {
   readonly code = 'INVALID_INPUT';
@@ -35,13 +57,46 @@ export function parseChatBody(body: unknown): { messages: ChatMessage[]; reasoni
   if (body.messages.length > 100) throw new InputError('当前对话已超过 100 条消息，请新建对话后继续。原对话仍保存在本机。');
   const messages: ChatMessage[] = [];
   let totalLength = 0;
+  let imageLength = 0;
+  let imageCount = 0;
   for (const item of body.messages) {
-    if (!isRecord(item) || (item.role !== 'user' && item.role !== 'assistant') || !boundedString(item.content, 20_000)) {
+    if (!isRecord(item) || (item.role !== 'user' && item.role !== 'assistant')) {
       throw new InputError('消息格式无效');
     }
-    totalLength += (item.content as string).length;
+    let content: ChatMessage['content'];
+    if (typeof item.content === 'string') {
+      if (!boundedString(item.content, 20_000)) throw new InputError('消息格式无效');
+      content = item.content;
+      totalLength += content.length;
+    } else {
+      if (item.role !== 'user' || !Array.isArray(item.content) || !item.content.length || item.content.length > 8) throw new InputError('消息格式无效');
+      const parts: Array<TextPart | ImagePart> = [];
+      let textLength = 0;
+      let imagesInMessage = 0;
+      for (const part of item.content) {
+        if (!isRecord(part)) throw new InputError('消息格式无效');
+        if (part.type === 'text') {
+          if (!boundedString(part.text, 20_000)) throw new InputError('消息文字格式无效');
+          textLength += (part.text as string).length;
+          if (textLength > 20_000) throw new InputError('单条消息文字过长');
+          parts.push({ type: 'text', text: part.text as string });
+        } else if (part.type === 'image_url') {
+          imagesInMessage += 1;
+          if (imagesInMessage > 4) throw new InputError('每条消息最多上传 4 张图片');
+          const image = parseImagePart(part);
+          imageLength += image.image_url.url.length;
+          imageCount += 1;
+          if (imageLength > MAX_IMAGE_CONTEXT_LENGTH || imageCount > 20) {
+            throw new InputError('当前对话图片过多，请新建对话继续。原图片仍保存在本机。');
+          }
+          parts.push(image);
+        } else throw new InputError('不支持的消息内容');
+      }
+      totalLength += textLength;
+      content = parts;
+    }
     if (totalLength > 200_000) throw new InputError('消息内容过长');
-    messages.push({ role: item.role, content: item.content as string });
+    messages.push({ role: item.role, content });
   }
   if (body.reasoningEffort !== 'low' && body.reasoningEffort !== 'medium' && body.reasoningEffort !== 'high') {
     throw new InputError('思考深度无效');

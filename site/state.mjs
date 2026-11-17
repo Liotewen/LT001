@@ -1,3 +1,5 @@
+import { MAX_IMAGES_PER_MESSAGE, isValidImageAttachment } from './images.mjs?v=20261117-images';
+
 export const STORAGE_KEY = 'lt-chat-state-v1';
 export const STATE_VERSION = 1;
 const EFFORTS = new Set(['low', 'medium', 'high']);
@@ -25,7 +27,10 @@ function validMessage(value) {
     && typeof value.id === 'string'
     && (value.role === 'user' || value.role === 'assistant')
     && typeof value.content === 'string'
-    && typeof value.createdAt === 'string';
+    && typeof value.createdAt === 'string'
+    && (value.images === undefined || (value.role === 'user'
+      && Array.isArray(value.images) && value.images.length <= MAX_IMAGES_PER_MESSAGE
+      && value.images.every(isValidImageAttachment)));
 }
 
 function validConversation(value) {
@@ -89,7 +94,13 @@ export function buildChatPayload(conversation, reasoningEffort = conversation.re
   return {
     messages: conversation.messages
       .filter((message) => message.role === 'user' || message.role === 'assistant')
-      .map((message) => ({ role: message.role, content: message.content })),
+      .map((message) => ({
+        role: message.role,
+        content: message.images?.length ? [
+          ...(message.content ? [{ type: 'text', text: message.content }] : []),
+          ...message.images.map((image) => ({ type: 'image_url', image_url: { url: image.dataUrl, detail: 'auto' } })),
+        ] : message.content,
+      })),
     reasoningEffort: effort,
   };
 }
